@@ -1,0 +1,269 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[48]:
+
+
+import pandas as pd
+from sqlalchemy import create_engine
+import argparse
+from ftplib import FTP
+from time import sleep
+import os
+import pysftp
+import shutil
+from datetime import datetime
+import dateutil.relativedelta
+
+def parseArgs():
+    parser = argparse.ArgumentParser(
+        description='xxxxxxx')
+    parser.add_argument('--week_id', action="store", dest="week_id",
+                        help="week id (YYYYIW)",
+                        required=True)
+    args = parser.parse_args()
+    return args
+
+
+args = parseArgs()
+week_id = int(args.week_id)
+yyyy = str(week_id)[:4]
+ww = str(week_id)[-2:]
+
+
+ftp_properties = {
+        'address': "10.xx.xx.xx.xx",
+        'username': 'username',
+        'password': 'password',
+        'local_dir': '/xx/xxxxxx',
+        'remote_dir': 'xx/xxxxx/xx '+ yyyy + ' W' + ww + '*.xlsb'
+} 
+SSL_ARGS = {
+    'sslcert' : "/home/dags/certificate/dev/postgres.crt",
+    'sslkey' : "/home/dags/certificate/dev/postgres.key",
+    "sslrootcert" : "/home/dags/certificate/dev/root.crt",
+    'sslmode':'require',
+}
+
+SSL_ARGS = {
+    'sslmode':'require',
+    'sslcert' : "/home/dads/work/drv/dna/others/ssl/dev/postgres.crt",
+    'sslkey' : "/home/dads/work/drv/dna/others/ssl/dev/postgres.key",
+    "sslrootcert" : "/home/dads/work/drv/dna/others/ssl/dev/root.crt"
+}
+
+def sifadev_execute(query):
+    import psycopg2
+    database = psycopg2.connect(host='10.xx.xx.xxx',
+                                        port=5433,
+                                        user='user',
+                                        password='pass',
+                                        database='db', **SSL_ARGS)
+    cursor = database.cursor()
+    cursor.execute(query)
+    database.commit()
+    cursor.close()
+    database.close()
+
+dev_engine = create_engine('remote_dir', connect_args=SSL_ARGS)
+
+def connect_to_sftp(properties):
+    cnt = 0
+    ftp_ = None
+    cn_opts = pysftp.CnOpts()
+    cn_opts.hostkeys = None
+
+    while cnt < 10:
+        try:
+            ftp_ = pysftp.Connection(host=properties['address'],
+                                     username=properties['username'],
+                                     password=properties['password'],
+                                     cnopts=cn_opts)
+        except Exception:
+            print("Connection can not be established")
+            sleep(2)
+            cnt += 1
+            continue
+        break
+    return ftp_
+
+def connect_to_ftp(properties):
+    cnt = 0
+    ftp_ = None
+    while cnt < 10:
+        try:
+            ftp_ = FTP(properties['address'])
+            ftp_.login(properties['username'], properties['password'])
+        except Exception:
+            print("Connection can not be established")
+            sleep(2)
+            cnt += 1
+            continue
+        break
+    return ftp_
+
+
+ftp = connect_to_ftp(ftp_properties)
+
+print('yay!')
+local_path = []
+
+
+
+file_list = ftp.nlst(ftp_properties['remote_dir'])
+file_list.sort(reverse=True)
+ftp_path = file_list[0]
+print(ftp_path)
+
+
+local_dir = ftp_properties['local_dir']
+if not os.path.exists(local_dir):
+    os.makedirs(local_dir)
+else:
+    shutil.rmtree(local_dir)
+    os.makedirs(local_dir)
+    
+file_name = ftp_path.rsplit('/', 1)[-1].replace(' ', '_')
+local_path = local_dir + file_name
+
+handle = open(local_path, 'wb')
+ftp.retrbinary('RETR %s' % ftp_path, handle.write)
+handle.close()
+print(local_path, 'downloaded')
+
+xl = pd.ExcelFile(local_path, engine='pyxlsb')
+xl.sheet_names
+sheet = [x for x in xl.sheet_names if ('WK' + ww) in x][0]
+df = pd.read_excel(local_path, engine='pyxlsb', sheet_name=sheet,  usecols = "A:BE")
+
+cols = []
+import re
+
+for i in df.columns:
+    string = re.sub(r'(?<!^)(?=[A-Z])', '_', i.lower().replace(' ', '_')).lower()
+    pattern = re.compile('\W')
+    string = re.sub(pattern, '', string)
+    r = re.compile(r"^[^a-z]+")  
+    string = r.sub("",string)
+    string = re.sub('_+', '_', string)
+    cols.append(string)
+    print(string)
+df.columns = cols
+df.head()
+
+
+import math
+week_count = 3
+new_cols = {}
+for c in df.columns :
+    if c.startswith('bandwidth_'):
+        new_cols[c] = 'bandwidth_wk_' + str(week_count)
+        week_count-=1
+if week_count != -1:
+    raise Exception("bandwidth column number mismatch")
+
+week_columns =  ['prb_usage_wk', 'active_user_wk', 'remark_opsi1_wk', 'prb_thd_wk', 'user_thd_wk']
+week_count = 3
+found_columns = 0
+for c in df.columns:
+    flag = 0
+    for sub in week_columns:
+        if c.startswith(sub): 
+            found_columns += 1
+            w = math.floor((len(week_columns)*week_count-found_columns)/len(week_columns))
+            new_cols[c] = sub + '_' + str(w)
+            flag = 1
+            break
+
+if found_columns != 15:
+    raise Exception("weekly column number mismatch")
+
+new_cols['final_opsi1_wk' + str(ww)] = 'final_opsi1_wk_0'
+new_cols['final_opsi2_sameday_wk' + str(ww)] = 'final_opsi2_sameday_wk_0'
+new_cols['final_remark_wk' + str(ww)] = 'final_remark_wk_0'
+
+df= df.rename(columns=new_cols)
+df.head()
+df.columns
+df['yearweek'] = week_id
+
+
+df_cell_ref = pd.read_sql(sql="select * xxxx", con = dev_engine)
+df.columns = df_cell_ref.columns
+sifadev_execute("delete from xxx.red_cell_ww where yearweek = {}".format(week_id))
+df.to_sql('red_cell_ww',
+                 con=dev_engine,
+                 schema='sifadev',
+                 if_exists='append',
+                 index=False)
+
+
+df = pd.read_excel(local_path, engine='pyxlsb', sheet_name='Final',  usecols = "A:AZ,BB:BE", skiprows=2)
+df.head()
+
+cols = []
+import re
+
+for i in df.columns:
+    string = re.sub(r'(?<!^)(?=[A-Z])', '_', i.lower().replace('1st', 'first').replace('2nd', 'second').replace(' ', '_')).lower()
+    pattern = re.compile('\W')
+    string = re.sub(pattern, '', string)
+    r = re.compile(r"^[^a-z]+")  
+    string = r.sub("",string)
+    string = re.sub('_+', '_', string)
+    string = re.sub(r"\_+$", "", string)
+    cols.append(string)
+    print(string)
+
+import math
+new_cols = {}
+week_columns =  ['sum_of_prb_usage_wk', 'sum_of_prb_thd_wk', 'sum_of_active_user_wk', 'sum_of_user_thd_wk', 'prb_occupancy_wk', 'user_occupancy_wk', 'first_occupancy_sector_wk', 'second_occupancy_sector_wk']
+week_count = 3
+found_columns = 0
+for c in cols:
+    flag = 0
+    for sub in week_columns:
+        if c.startswith(sub): 
+            found_columns += 1
+            w = math.floor((len(week_columns)*week_count-found_columns)/len(week_columns))
+            new_cols[c] = sub + '_' + str(w)
+            flag = 1
+            break
+print(found_columns)
+
+if found_columns != 24:
+    raise Exception("weekly column number mismatch")
+
+week_columns =  [ 'first_occupancy_sector_code_wk', 'second_occupancy_sector_code_wk',]
+week_count = 3
+found_columns = 0
+for c in cols:
+    flag = 0
+    for sub in week_columns:
+        if c.startswith(sub): 
+            w = ((week_count-1)-found_columns%week_count)
+            found_columns += 1
+            new_cols[c] = sub + '_' + str(w)
+            flag = 1
+            break
+if found_columns != 6:
+    raise Exception("weekly column number mismatch")
+
+df.columns = cols
+df= df.rename(columns=new_cols)
+df.head()
+df.columns
+df['yearweek'] = week_id
+
+sifadev_execute("delete from sifadev.red_sector_ww where yearweek = {}".format(week_id))
+df_sector_ref = pd.read_sql(sql="select * from sifadev.red_sector_ww where false", con = dev_engine)
+df.columns = df_sector_ref.columns
+df.to_sql('red_sector_ww',
+                 con=dev_engine,
+                 schema='sifadev',
+                 if_exists='append',
+                 index=False)
+
+import os
+os.remove(local_path)
+print('mission success!')
