@@ -1,1 +1,1 @@
-ETL Process with FTP file
+ETL Process from FTP server to Database
