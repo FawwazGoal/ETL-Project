@@ -1,2 +1,1 @@
-# SSIS-ETL-Project
-ETL project at work
+ETL Process with FTP file
